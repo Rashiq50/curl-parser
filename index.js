@@ -1,3 +1,4 @@
+import "dotenv/config";
 import express from "express";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
@@ -7,15 +8,23 @@ import * as curlconverter from "curlconverter";
 import cors from "cors";
 import xml2js from "xml2js";
 import fs from "fs";
+import crypto from "crypto";
 import multer from "multer";
 import { fileURLToPath } from "url";
 import { dirname } from "path";
 import cookieParser from "cookie-parser";
+import Redis from "ioredis";
 
 const userName = "admin";
 const password = "Admin123!";
 const COOKIE_NAME = "auth_token";
 const COOKIE_VALUE = "secure_auth_token";
+
+// Redis client
+const redis = new Redis(process.env.REDIS_URL || "redis://localhost:6379");
+
+redis.on("connect", () => console.log("Connected to Redis"));
+redis.on("error", (err) => console.error("Redis connection error:", err));
 
 // Get current file path (ES module equivalent of __dirname)
 const __filename = fileURLToPath(import.meta.url);
@@ -259,6 +268,142 @@ app.get("/users", (req, res) => {
 app.post("/logout", (req, res) => {
   res.clearCookie(COOKIE_NAME);
   res.json({ message: "Logged out successfully" });
+});
+
+// --- Shareable Link APIs ---
+
+const REDIS_KEY_PREFIX = "shareable-link:";
+
+function parseExpiration(expiration) {
+  const match = expiration.match(/^(\d+)(d|h|m)$/);
+  if (!match) return null;
+  const value = parseInt(match[1]);
+  const unit = match[2];
+  const multipliers = { d: 86400, h: 3600, m: 60 };
+  return value * multipliers[unit];
+}
+
+const generateLinkSchema = Joi.object({
+  bugId: Joi.string().trim().required().messages({
+    "string.empty": "Bug ID cannot be empty.",
+    "any.required": "Bug ID is required.",
+  }),
+  expiration: Joi.string()
+    .trim()
+    .required()
+    .pattern(/^\d+(d|h|m)$/)
+    .messages({
+      "string.empty": "Expiration cannot be empty.",
+      "string.pattern.base":
+        'Invalid expiration format. Use a number followed by d (days), h (hours), or m (minutes), e.g. "7d", "24h", "30m".',
+      "any.required": "Expiration is required.",
+    }),
+});
+
+app.post("/generate-link", async (req, res) => {
+  const { error, value } = generateLinkSchema.validate(req.body);
+  if (error) {
+    return res
+      .status(400)
+      .json({ success: false, message: error.details[0].message });
+  }
+
+  const { bugId, expiration } = value;
+  const ttlSeconds = parseExpiration(expiration);
+
+  if (!ttlSeconds || ttlSeconds <= 0) {
+    return res
+      .status(400)
+      .json({ success: false, message: "Invalid expiration value." });
+  }
+
+  try {
+    const token = crypto.randomBytes(32).toString("hex");
+    const redisKey = `${REDIS_KEY_PREFIX}${token}`;
+
+    await redis.set(redisKey, JSON.stringify({ bugId }), "EX", ttlSeconds);
+
+    res.status(201).json({
+      success: true,
+      data: { token, expiresIn: ttlSeconds },
+    });
+  } catch (err) {
+    console.error("Error generating shareable link:", err);
+    res.status(500).json({
+      success: false,
+      message: "Failed to generate shareable link.",
+    });
+  }
+});
+
+app.get("/validate-link/:token", async (req, res) => {
+  const { token } = req.params;
+
+  try {
+    const redisKey = `${REDIS_KEY_PREFIX}${token}`;
+    const data = await redis.get(redisKey);
+
+    if (!data) {
+      return res.status(404).json({
+        success: false,
+        message: "Token is invalid or has expired.",
+      });
+    }
+
+    const { bugId } = JSON.parse(data);
+
+    res.json({
+      success: true,
+      data: { bugId, valid: true },
+    });
+  } catch (err) {
+    console.error("Error validating link:", err);
+    res.status(500).json({
+      success: false,
+      message: "Failed to validate link.",
+    });
+  }
+});
+
+const dismissLinkSchema = Joi.object({
+  token: Joi.string().trim().required().messages({
+    "string.empty": "Token cannot be empty.",
+    "any.required": "Token is required.",
+  }),
+});
+
+app.post("/dismiss-link", async (req, res) => {
+  const { error, value } = dismissLinkSchema.validate(req.body);
+  if (error) {
+    return res
+      .status(400)
+      .json({ success: false, message: error.details[0].message });
+  }
+
+  const { token } = value;
+
+  try {
+    const redisKey = `${REDIS_KEY_PREFIX}${token}`;
+    const deleted = await redis.del(redisKey);
+
+    if (deleted === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Token not found or already expired.",
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Token dismissed successfully.",
+    });
+  } catch (err) {
+    console.error("Error dismissing link:", err);
+    res.status(500).json({
+      success: false,
+      message: "Failed to dismiss link.",
+    });
+  }
 });
 
 // Catch-all route for invalid endpoints
