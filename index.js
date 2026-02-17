@@ -298,6 +298,16 @@ const generateLinkSchema = Joi.object({
         'Invalid expiration format. Use a number followed by d (days), h (hours), or m (minutes), e.g. "7d", "24h", "30m".',
       "any.required": "Expiration is required.",
     }),
+  type: Joi.string()
+    .valid("VIDEO", "SCREENSHOT")
+    .required()
+    .messages({
+      "any.only": 'Type must be either "VIDEO" or "SCREENSHOT".',
+      "any.required": "Type is required.",
+    }),
+  withAudio: Joi.boolean().required().messages({
+    "any.required": "withAudio is required.",
+  }),
 });
 
 app.post("/generate-link", async (req, res) => {
@@ -308,7 +318,7 @@ app.post("/generate-link", async (req, res) => {
       .json({ success: false, message: error.details[0].message });
   }
 
-  const { bugId, expiration } = value;
+  const { bugId, expiration, type, withAudio } = value;
   const ttlSeconds = parseExpiration(expiration);
 
   if (!ttlSeconds || ttlSeconds <= 0) {
@@ -321,7 +331,12 @@ app.post("/generate-link", async (req, res) => {
     const token = crypto.randomBytes(32).toString("hex");
     const redisKey = `${REDIS_KEY_PREFIX}${token}`;
 
-    await redis.set(redisKey, JSON.stringify({ bugId }), "EX", ttlSeconds);
+    await redis.set(
+      redisKey,
+      JSON.stringify({ bugId, type, withAudio }),
+      "EX",
+      ttlSeconds
+    );
 
     res.status(201).json({
       success: true,
@@ -350,11 +365,11 @@ app.get("/validate-link/:token", async (req, res) => {
       });
     }
 
-    const { bugId } = JSON.parse(data);
+    const { bugId, type, withAudio } = JSON.parse(data);
 
     res.json({
       success: true,
-      data: { bugId, valid: true },
+      data: { bugId, type, withAudio, valid: true },
     });
   } catch (err) {
     console.error("Error validating link:", err);
