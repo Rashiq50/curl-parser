@@ -309,6 +309,7 @@ const generateLinkSchema = Joi.object({
   withAudio: Joi.boolean().required().messages({
     "any.required": "withAudio is required.",
   }),
+  message: Joi.string().trim().allow("").optional(),
 });
 
 app.post("/generate-link", async (req, res) => {
@@ -319,7 +320,7 @@ app.post("/generate-link", async (req, res) => {
       .json({ success: false, message: error.details[0].message });
   }
 
-  const { bugId, expiration, type, withAudio } = value;
+  const { bugId, expiration, type, withAudio, message } = value;
   const ttlSeconds = parseExpiration(expiration);
 
   if (!ttlSeconds || ttlSeconds <= 0) {
@@ -342,7 +343,7 @@ app.post("/generate-link", async (req, res) => {
 
     await redis.set(
       redisKey,
-      JSON.stringify({ bugId, type, withAudio }),
+      JSON.stringify({ bugId, type, withAudio, message }),
       "EX",
       ttlSeconds
     );
@@ -375,11 +376,11 @@ app.get("/validate-link/:token", async (req, res) => {
       });
     }
 
-    const { bugId, type, withAudio } = JSON.parse(data);
+    const { bugId, type, withAudio, message: devMessage } = JSON.parse(data);
 
     res.json({
       success: true,
-      data: { bugId, type, withAudio, valid: true },
+      data: { bugId, type, withAudio, message: devMessage, valid: true },
     });
   } catch (err) {
     console.error("Error validating link:", err);
