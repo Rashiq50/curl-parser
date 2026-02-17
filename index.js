@@ -273,6 +273,7 @@ app.post("/logout", (req, res) => {
 // --- Shareable Link APIs ---
 
 const REDIS_KEY_PREFIX = "shareable-link:";
+const REDIS_REVERSE_KEY_PREFIX = "shareable-link-bug:";
 
 function parseExpiration(expiration) {
   const match = expiration.match(/^(\d+)(d|h|m)$/);
@@ -328,6 +329,14 @@ app.post("/generate-link", async (req, res) => {
   }
 
   try {
+    // Invalidate any existing token for this bugId
+    const reverseKey = `${REDIS_REVERSE_KEY_PREFIX}${bugId}`;
+    const existingToken = await redis.get(reverseKey);
+    if (existingToken) {
+      await redis.del(`${REDIS_KEY_PREFIX}${existingToken}`);
+    }
+
+    // Create new token
     const token = crypto.randomBytes(32).toString("hex");
     const redisKey = `${REDIS_KEY_PREFIX}${token}`;
 
@@ -337,6 +346,7 @@ app.post("/generate-link", async (req, res) => {
       "EX",
       ttlSeconds
     );
+    await redis.set(reverseKey, token, "EX", ttlSeconds);
 
     res.status(201).json({
       success: true,
@@ -399,13 +409,22 @@ app.post("/dismiss-link", async (req, res) => {
 
   try {
     const redisKey = `${REDIS_KEY_PREFIX}${token}`;
-    const deleted = await redis.del(redisKey);
 
-    if (deleted === 0) {
+    // Read forward key to get bugId for reverse key cleanup
+    const data = await redis.get(redisKey);
+    if (!data) {
       return res.status(404).json({
         success: false,
         message: "Token not found or already expired.",
       });
+    }
+
+    const { bugId } = JSON.parse(data);
+
+    // Delete both forward and reverse keys
+    await redis.del(redisKey);
+    if (bugId) {
+      await redis.del(`${REDIS_REVERSE_KEY_PREFIX}${bugId}`);
     }
 
     res.json({
