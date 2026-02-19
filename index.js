@@ -300,10 +300,10 @@ const generateLinkSchema = Joi.object({
       "any.required": "Expiration is required.",
     }),
   type: Joi.string()
-    .valid("VIDEO", "SCREENSHOT", "BOTH")
+    .valid("VIDEO", "SCREENSHOT", "BOTH", "WIDGET")
     .required()
     .messages({
-      "any.only": 'Type must be "VIDEO", "SCREENSHOT", or "BOTH".',
+      "any.only": 'Type must be "VIDEO", "SCREENSHOT", "BOTH", or "WIDGET".',
       "any.required": "Type is required.",
     }),
   withAudio: Joi.boolean().required().messages({
