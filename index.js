@@ -441,6 +441,9 @@ app.post("/dismiss-link", async (req, res) => {
   }
 });
 
+// Mount parameterization router
+app.use('/parameterization', createParameterizationRouter());
+
 // Catch-all route for invalid endpoints
 app.use((req, res) => {
   res.status(404).json({
@@ -448,6 +451,930 @@ app.use((req, res) => {
     message: "The requested endpoint does not exist.",
   });
 });
+
+
+/** @param {string} url */
+function safeParseUrl(url) {
+  try {
+    return new URL(url);
+  } catch {
+    return null;
+  }
+}
+
+/** @param {any} value */
+function safeJsonParse(value) {
+  if (value === null || value === undefined) return undefined;
+  if (typeof value === 'object') return value;
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return undefined;
+  }
+}
+
+/** @param {string} resource */
+function singularize(resource) {
+  if (!resource) return resource;
+  if (resource.endsWith('ies')) return `${resource.slice(0, -3)}y`;
+  if (resource.endsWith('s') && resource.length > 1) return resource.slice(0, -1);
+  return resource;
+}
+
+/**
+ * @param {string[]} segments
+ * @param {number} idSegmentIndex
+ */
+function guessVarNameFromPathSegments(segments, idSegmentIndex) {
+  const prev = segments[idSegmentIndex - 1] || 'resource';
+  const base = singularize(prev.replace(/[^a-zA-Z0-9]/g, '')) || 'resource';
+  return `${base}Id`;
+}
+
+/**
+ * @param {string} pathname
+ * @param {string} targetSegment
+ * @param {string} replacement
+ */
+function replaceAllExactSegment(pathname, targetSegment, replacement) {
+  const parts = pathname.split('/');
+  const out = parts.map((seg) => (seg === targetSegment ? replacement : seg));
+  return out.join('/');
+}
+
+/** @param {string} str */
+function escapeRegex(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * @param {string} parentPath
+ * @param {string} key
+ */
+function jsonPathForKey(parentPath, key) {
+  if (/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(key)) return `${parentPath}.${key}`;
+  return `${parentPath}[${JSON.stringify(key)}]`;
+}
+
+// ---------------------------------------------------------------------------
+// URL helpers (boundary-aware)
+// ---------------------------------------------------------------------------
+
+/**
+ * @param {string} url
+ * @param {string} rawValue
+ * @returns {boolean}
+ */
+function valueAppearsAsCompleteUrlComponent(url, rawValue) {
+  const urlObj = safeParseUrl(url);
+  if (!urlObj) return url.includes(rawValue);
+
+  const segments = urlObj.pathname.split('/').filter(Boolean);
+  if (segments.includes(rawValue)) return true;
+
+  for (const [, paramValue] of urlObj.searchParams.entries()) {
+    if (paramValue === rawValue) return true;
+  }
+  return false;
+}
+
+/**
+ * @param {string} url
+ * @param {string} rawValue
+ * @param {string} replacement
+ * @returns {string}
+ */
+function replaceInUrlBoundaryAware(url, rawValue, replacement) {
+  const urlObj = safeParseUrl(url);
+  if (!urlObj) return url;
+
+  const pathname = replaceAllExactSegment(urlObj.pathname, rawValue, replacement);
+
+  const newParams = new URLSearchParams();
+  for (const [key, paramValue] of urlObj.searchParams.entries()) {
+    newParams.append(key, paramValue === rawValue ? replacement : paramValue);
+  }
+
+  const queryString = newParams.toString();
+  const decodedQuery = queryString
+    .replace(/%7B%7B/g, '{{')
+    .replace(/%7D%7D/g, '}}');
+
+  const search = decodedQuery ? `?${decodedQuery}` : '';
+  return `${urlObj.origin}${pathname}${search}${urlObj.hash}`;
+}
+
+// ---------------------------------------------------------------------------
+// JSON body helpers (boundary-aware)
+// ---------------------------------------------------------------------------
+
+/**
+ * Check if value exists as an exact match anywhere in an object.
+ * Uses iterative stack to avoid stack overflow on deep JSON.
+ * @param {any} obj
+ * @param {string} rawValue
+ * @returns {boolean}
+ */
+function checkValueExistsInObject(obj, rawValue) {
+  const stack = [obj];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (current === null || current === undefined) continue;
+    if (Array.isArray(current)) {
+      for (let i = current.length - 1; i >= 0; i--) stack.push(current[i]);
+      continue;
+    }
+    if (typeof current === 'object') {
+      const values = Object.values(current);
+      for (let i = values.length - 1; i >= 0; i--) stack.push(values[i]);
+      continue;
+    }
+    if (typeof current === 'string' && current === rawValue) return true;
+  }
+  return false;
+}
+
+/**
+ * Replace exact string values in a JSON object (iterative).
+ * @param {any} obj
+ * @param {string} rawValue
+ * @param {string} replacement
+ * @returns {any}
+ */
+function replaceExactValuesInObject(obj, rawValue, replacement) {
+  if (obj === null || obj === undefined) return obj;
+  if (typeof obj === 'string') return obj === rawValue ? replacement : obj;
+  if (typeof obj !== 'object') return obj;
+
+  if (Array.isArray(obj)) {
+    return obj.map((item) => replaceExactValuesInObject(item, rawValue, replacement));
+  }
+
+  const result = {};
+  for (const [key, value] of Object.entries(obj)) {
+    result[key] = replaceExactValuesInObject(value, rawValue, replacement);
+  }
+  return result;
+}
+
+/**
+ * @param {string} body
+ * @param {string} rawValue
+ * @returns {boolean}
+ */
+function valueAppearsAsCompleteJsonValue(body, rawValue) {
+  if (!body || !rawValue) return false;
+
+  const parsed = safeJsonParse(body);
+  if (parsed && typeof parsed === 'object') {
+    return checkValueExistsInObject(parsed, rawValue);
+  }
+
+  const escaped = escapeRegex(rawValue);
+  const jsonStringPattern = new RegExp(`"${escaped}"`);
+  return jsonStringPattern.test(body);
+}
+
+/**
+ * @param {string|null} body
+ * @param {string} rawValue
+ * @param {string} replacement
+ * @returns {string|null}
+ */
+function replaceInBodyBoundaryAware(body, rawValue, replacement) {
+  if (!body || typeof body !== 'string') return body;
+
+  const parsed = safeJsonParse(body);
+  if (parsed && typeof parsed === 'object') {
+    const replaced = replaceExactValuesInObject(parsed, rawValue, replacement);
+    try {
+      return JSON.stringify(replaced, null, 2);
+    } catch {
+      return JSON.stringify(replaced);
+    }
+  }
+
+  const escaped = escapeRegex(rawValue);
+  const jsonStringPattern = new RegExp(`"${escaped}"`, 'g');
+  return body.replace(jsonStringPattern, `"${replacement}"`);
+}
+
+// ---------------------------------------------------------------------------
+// Header helpers (boundary-aware)
+// ---------------------------------------------------------------------------
+
+/**
+ * @param {Array<{key:string,value:string,enabled?:boolean}>} headers
+ * @param {string} rawValue
+ * @returns {boolean}
+ */
+function valueAppearsAsCompleteHeaderValue(headers, rawValue) {
+  if (!Array.isArray(headers) || headers.length === 0) return false;
+
+  return headers.some((h) => {
+    const value = typeof h?.value === 'string' ? h.value : '';
+    if (!value) return false;
+    if (value === rawValue) return true;
+    if (value === `Bearer ${rawValue}`) return true;
+    const segments = value.split(',').map((s) => s.trim());
+    if (segments.includes(rawValue)) return true;
+    return false;
+  });
+}
+
+/**
+ * @param {Array<{key:string,value:string,enabled?:boolean}>} headers
+ * @param {string} rawValue
+ * @param {string} replacement
+ * @returns {Array<{key:string,value:string,enabled?:boolean}>}
+ */
+function replaceInHeadersBoundaryAware(headers, rawValue, replacement) {
+  if (!Array.isArray(headers) || headers.length === 0) return headers;
+
+  return headers.map((h) => {
+    const value = typeof h?.value === 'string' ? h.value : '';
+    if (!value) return h;
+
+    if (value === rawValue) return { ...h, value: replacement };
+    if (value === `Bearer ${rawValue}`) return { ...h, value: `Bearer ${replacement}` };
+
+    if (value.includes(',') && value.includes(rawValue)) {
+      const segments = value.split(',').map((s) => s.trim());
+      if (segments.includes(rawValue)) {
+        const newSegments = segments.map((s) => (s === rawValue ? replacement : s));
+        return { ...h, value: newSegments.join(', ') };
+      }
+    }
+
+    return h;
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Response body extraction
+// ---------------------------------------------------------------------------
+
+/** @param {any} req */
+function getResponseBodyObjectFromRequest(req) {
+  if (!req) return undefined;
+
+  const candidate =
+    req?.responseData?.responseBody ??
+    req?.responseData?.payload ??
+    req?.responseData?.body ??
+    req?.responseData?.resBody ??
+    req?.response?.responseBody ??
+    req?.response?.body ??
+    req?.response?.data ??
+    req?.response?.payload ??
+    req?.response ??
+    undefined;
+
+  return safeJsonParse(candidate) ?? (typeof candidate === 'object' ? candidate : undefined);
+}
+
+// ---------------------------------------------------------------------------
+// Leaf collection — iterative (stack-based) to avoid stack overflow on deep JSON
+// ---------------------------------------------------------------------------
+
+/** Max response candidates per request to prevent blowup */
+const MAX_CANDIDATES_PER_REQUEST = 200;
+
+/**
+ * Collect all leaf values from a JSON object using an iterative approach.
+ * @param {any} root
+ * @returns {Array<{value:string, path:string, key:string}>}
+ */
+function collectJsonLeaves(root) {
+  const out = [];
+  if (root === null || root === undefined) return out;
+
+  /** @type {Array<{node:any, path:string, parentKey:string}>} */
+  const stack = [{ node: root, path: '$', parentKey: '' }];
+
+  while (stack.length > 0) {
+    const { node, path, parentKey } = stack.pop();
+
+    if (node === null || node === undefined) continue;
+
+    if (Array.isArray(node)) {
+      for (let i = node.length - 1; i >= 0; i--) {
+        stack.push({ node: node[i], path: `${path}[${i}]`, parentKey });
+      }
+      continue;
+    }
+
+    if (typeof node === 'object') {
+      const entries = Object.entries(node);
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const [k, v] = entries[i];
+        stack.push({ node: v, path: jsonPathForKey(path, k), parentKey: k });
+      }
+      continue;
+    }
+
+    if (typeof node === 'string' || typeof node === 'number' || typeof node === 'boolean') {
+      out.push({ value: String(node), path, key: parentKey });
+    }
+  }
+
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Variable name guessing
+// ---------------------------------------------------------------------------
+
+/** Pre-compiled regex for ID-like keys */
+const ID_KEY_REGEX = /(id|_id|uuid|token|code)$/;
+
+/** Generic path segment names to skip when building variable names */
+const GENERIC_NAMES = new Set([
+  'data', 'items', 'item', 'result', 'results', 'response',
+  'payload', 'body', 'content', 'value', 'values', 'list',
+  'array', 'object', 'localdata',
+]);
+
+/**
+ * @param {string} extractionPath
+ * @returns {string|null}
+ */
+function guessVarNameFromExtractionPath(extractionPath) {
+  if (!extractionPath) return null;
+
+  const normalized = extractionPath
+    .replace(/^\$\.?/, '')
+    .replace(/\[(\d+)\]/g, '.')
+    .replace(/\["([^"]+)"\]/g, '.$1')
+    .replace(/\['([^']+)'\]/g, '.$1');
+
+  const segments = normalized.split('.').filter(Boolean);
+  if (segments.length === 0) return null;
+
+  const lastSegment = segments[segments.length - 1];
+  const lastLower = lastSegment.toLowerCase();
+
+  if (lastLower === 'id' || lastLower === '_id') {
+    for (let i = segments.length - 2; i >= 0; i--) {
+      const segment = segments[i];
+      if (!segment || /^\d+$/.test(segment) || GENERIC_NAMES.has(segment.toLowerCase())) {
+        continue;
+      }
+      const cleaned = segment.replace(/[^a-zA-Z0-9]/g, '');
+      if (cleaned) return `${cleaned}Id`;
+    }
+    return 'id';
+  }
+
+  return null;
+}
+
+/**
+ * @param {string} key
+ * @param {string} requestUrl
+ * @param {string} [extractionPath]
+ * @returns {string}
+ */
+function guessVarNameFromKeyAndUrl(key, requestUrl, extractionPath) {
+  if (extractionPath) {
+    const pathDerivedName = guessVarNameFromExtractionPath(extractionPath);
+    if (pathDerivedName) return pathDerivedName;
+  }
+
+  const lower = (key || '').toLowerCase();
+  if (lower === 'accesstoken') return 'accessToken';
+  if (lower === 'refreshtoken') return 'refreshToken';
+  if (lower === 'rolecode') return 'roleCode';
+  if (lower === 'id' || lower === '_id') {
+    const url = safeParseUrl(requestUrl);
+    if (url) {
+      const segments = url.pathname.split('/').filter(Boolean);
+      const nonNumeric = segments.filter((s) => !/^\d+$/.test(s));
+      const resource = nonNumeric[nonNumeric.length - 1] || 'resource';
+      return `${singularize(resource)}Id`;
+    }
+    return 'id';
+  }
+  if (lower.includes('token')) return 'token';
+  if (lower.includes('uuid')) return 'uuid';
+  const cleaned = key.replace(/[^a-zA-Z0-9_]/g, '');
+  return cleaned || 'var';
+}
+
+// ---------------------------------------------------------------------------
+// Input mapper — converts raw network tab objects to interceptor format
+// ---------------------------------------------------------------------------
+
+/**
+ * @param {Record<string,string>|null|undefined} headers
+ * @returns {Array<{key:string, value:string}>}
+ */
+function headersObjectToArray(headers) {
+  if (!headers || typeof headers !== 'object' || Array.isArray(headers)) return [];
+  return Object.entries(headers).map(([key, value]) => ({
+    key,
+    value: String(value ?? ''),
+  }));
+}
+
+/**
+ * @param {string} url
+ * @returns {Array<{key:string, value:string}>}
+ */
+function extractQueryParams(url) {
+  try {
+    const u = new URL(url);
+    return Array.from(u.searchParams.entries()).map(([key, value]) => ({ key, value }));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Converts NetworkTab request objects (from browser extension capture)
+ * into the shape expected by `analyzeNetworkInterceptorRequests`.
+ *
+ * @param {any[]} requests
+ * @returns {Array<Object>} Array of NetworkInterceptorCapturedRequest-shaped objects
+ */
+export function mapNetworkRequestsToInterceptorFormat(requests) {
+  return (requests || []).map((req) => {
+    const hasPayload =
+      req.requestPayload &&
+      req.requestPayload !== '[No payload]' &&
+      req.requestPayload !== null;
+
+    let bodyString = null;
+    if (hasPayload) {
+      bodyString =
+        typeof req.requestPayload === 'string'
+          ? req.requestPayload
+          : JSON.stringify(req.requestPayload);
+    }
+
+    return {
+      uniqueId: req.id || String(Math.random()),
+      reqApiUrl: req.fullUrl || '',
+      reqMethod: req.method || 'GET',
+      timestamp: req.startTime || req.timestamp,
+      status: req.status,
+      requestData: {
+        reqApiUrl: req.fullUrl || '',
+        reqMethod: req.method || 'GET',
+        reqBody: { reqData: bodyString },
+        reqHeaders: headersObjectToArray(req.headers?.request),
+        reqParams: extractQueryParams(req.fullUrl || ''),
+      },
+      responseData: {
+        resHeaders: headersObjectToArray(req.headers?.response),
+        responseBody: req.responseContent,
+      },
+    };
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Core analysis
+// ---------------------------------------------------------------------------
+
+/**
+ * Analyzes captured network requests and produces parameterized output.
+ *
+ * @param {Array<Object>} requests — NetworkInterceptorCapturedRequest-shaped objects
+ * @returns {{ requests: Array<Object>, allExtractedParams: Array<Object> }}
+ */
+export function analyzeNetworkInterceptorRequests(requests) {
+  const toFiniteNumber = (v) => {
+    const n = typeof v === 'number' ? v : Number(v);
+    return Number.isFinite(n) ? n : undefined;
+  };
+
+  // Normalize to chronological order
+  const normalized = (requests || [])
+    .map((r, idx) => ({ r, idx, ts: toFiniteNumber(r?.timestamp) }))
+    .sort((a, b) => {
+      if (a.ts !== undefined && b.ts !== undefined) return a.ts - b.ts;
+      if (a.ts !== undefined) return -1;
+      if (b.ts !== undefined) return 1;
+      return a.idx - b.idx;
+    })
+    .map((x) => x.r);
+
+  /** @type {Map<string, number>} */
+  const producerIndexById = new Map();
+  normalized.forEach((req, idx) => producerIndexById.set(req.uniqueId, idx));
+
+  const parsed = normalized.map((r) => ({ r, url: safeParseUrl(r.reqApiUrl) }));
+
+  // ---- Response-based extraction candidates ----
+
+  /**
+   * @typedef {{ value:string, key:string, extractionPath:string, producerUniqueId:string, paramNameGuess:string }} ResponseCandidate
+   */
+
+  /** @type {ResponseCandidate[]} */
+  const responseCandidates = [];
+
+  for (const r of normalized) {
+    const responseObj = getResponseBodyObjectFromRequest(r);
+    if (!responseObj) continue;
+
+    const leaves = collectJsonLeaves(responseObj);
+    let candidateCount = 0;
+
+    for (const leaf of leaves) {
+      if (candidateCount >= MAX_CANDIDATES_PER_REQUEST) break;
+
+      const keyLower = (leaf.key || '').toLowerCase();
+      if (!ID_KEY_REGEX.test(keyLower)) continue;
+
+      // Filter noise
+      if (!leaf.value) continue;
+      if (keyLower.includes('token') && leaf.value.length < 6) continue;
+      if (!keyLower.includes('token') && leaf.value.length > 500) continue;
+      if (keyLower.includes('token') && leaf.value.length > 20000) continue;
+      if (keyLower.includes('uuid') && leaf.value.length < 8) continue;
+
+      if (keyLower.endsWith('code')) {
+        const v = leaf.value.trim();
+        if (v.length < 2 || v.length > 120) continue;
+        if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(v)) continue;
+        if (/^\d{2,4}$/.test(v)) continue;
+      }
+
+      responseCandidates.push({
+        value: leaf.value,
+        key: leaf.key,
+        extractionPath: leaf.path,
+        producerUniqueId: r.uniqueId,
+        paramNameGuess: guessVarNameFromKeyAndUrl(leaf.key || 'var', r.reqApiUrl, leaf.path),
+      });
+      candidateCount++;
+    }
+  }
+
+  // ---- Collect numeric path segment occurrences ----
+
+  /**
+   * @typedef {{ requestUniqueId:string, method:string, url:URL, idSegmentIndex:number, segments:string[], idValue:string }} Occurrence
+   */
+
+  /** @type {Occurrence[]} */
+  const occurrences = [];
+  for (const p of parsed) {
+    if (!p.url) continue;
+    const segments = p.url.pathname.split('/').filter(Boolean);
+    segments.forEach((seg, idx) => {
+      if (/^\d+$/.test(seg)) {
+        occurrences.push({
+          requestUniqueId: p.r.uniqueId,
+          method: p.r.reqMethod,
+          url: p.url,
+          idSegmentIndex: idx,
+          segments,
+          idValue: seg,
+        });
+      }
+    });
+  }
+
+  // Group by host + path template + idValue
+  /** @param {Occurrence} o */
+  const groupKey = (o) => {
+    const templSegments = o.segments.map((s) => (/^\d+$/.test(s) ? ':id' : s));
+    return `${o.url.host}|/${templSegments.join('/')}|${o.idValue}`;
+  };
+
+  /** @type {Map<string, Occurrence[]>} */
+  const groups = new Map();
+  for (const o of occurrences) {
+    const key = groupKey(o);
+    let list = groups.get(key);
+    if (!list) {
+      list = [];
+      groups.set(key, list);
+    }
+    list.push(o);
+  }
+
+  // ---- Candidate variables from repeated numeric segments ----
+
+  /** @type {Array<{name:string, producerRequestUniqueId:string, extractionPath:string, enabled:boolean}>} */
+  const extractedParams = [];
+
+  /** @type {Map<string, string>} idValue -> paramName */
+  const idValueToParamName = new Map();
+
+  /** @type {Map<string, string>} paramName -> producerUniqueId */
+  const producerByParamName = new Map();
+
+  for (const occs of groups.values()) {
+    if (occs.length < 2) continue;
+
+    const first = occs[0];
+    const guessedName = guessVarNameFromPathSegments(first.segments, first.idSegmentIndex);
+    let name = guessedName;
+    let i = 2;
+    while (extractedParams.some((p) => p.name === name)) {
+      name = `${guessedName}${i++}`;
+    }
+
+    const host = first.url.host;
+    const resourcePath = `/${first.segments
+      .filter((_, idx) => idx !== first.idSegmentIndex)
+      .join('/')}`;
+
+    const producerCandidate = parsed
+      .filter((p) => p.url?.host === host)
+      .filter((p) => p.r.reqMethod?.toUpperCase() === 'POST')
+      .find((p) => p.url?.pathname === resourcePath);
+
+    const producerUniqueId = producerCandidate?.r.uniqueId ?? occs[0].requestUniqueId;
+
+    extractedParams.push({
+      name,
+      producerRequestUniqueId: producerUniqueId,
+      extractionPath: '$.id',
+      enabled: true,
+    });
+
+    idValueToParamName.set(first.idValue, name);
+    producerByParamName.set(name, producerUniqueId);
+  }
+
+  // ---- Track response-derived extracted params ----
+
+  /** @type {Array<{name:string, producerRequestUniqueId:string, extractionPath:string, enabled:boolean}>} */
+  const responseExtractedParams = [];
+
+  /** @type {Map<string, string>} value -> paramName */
+  const responseValueToParamName = new Map();
+
+  /** @param {string} base */
+  const ensureUniqueParamName = (base) => {
+    const cleaned = (base || 'var').trim() || 'var';
+    let candidate = cleaned;
+    let i = 2;
+    while (
+      responseExtractedParams.some((p) => p.name === candidate) ||
+      extractedParams.some((p) => p.name === candidate)
+    ) {
+      candidate = `${cleaned}${i++}`;
+    }
+    return candidate;
+  };
+
+  // ---- Build per-request models ----
+
+  const perRequest = normalized.map((r) => {
+    const originalUrl = r.reqApiUrl;
+    const originalBody =
+      typeof r.requestData?.reqBody?.reqData === 'string'
+        ? r.requestData.reqBody.reqData
+        : null;
+
+    const originalHeaders = Array.isArray(r.requestData?.reqHeaders)
+      ? r.requestData.reqHeaders.map((h) => ({
+          key: String(h?.key ?? ''),
+          value: String(h?.value ?? ''),
+          enabled: h?.enabled,
+        }))
+      : [];
+
+    let parameterizedUrl = originalUrl;
+    let parameterizedBody = originalBody;
+    let parameterizedHeaders = originalHeaders;
+
+    /** @type {Array<{name:string, locations:Array<'url'|'body'|'headers'>}>} */
+    const used = [];
+
+    // 1) Response-based substitution (preferred) — sort longest-first
+    const currentIdx = producerIndexById.get(r.uniqueId) ?? 0;
+    const priorResponseCandidates = responseCandidates
+      .filter((c) => (producerIndexById.get(c.producerUniqueId) ?? -1) < currentIdx)
+      .sort((a, b) => b.value.length - a.value.length);
+
+    for (const c of priorResponseCandidates) {
+      const appearsInUrl = valueAppearsAsCompleteUrlComponent(parameterizedUrl, c.value);
+      const appearsInBody =
+        !!parameterizedBody && valueAppearsAsCompleteJsonValue(parameterizedBody, c.value);
+      const appearsInHeaders = valueAppearsAsCompleteHeaderValue(parameterizedHeaders, c.value);
+      if (!appearsInUrl && !appearsInBody && !appearsInHeaders) continue;
+
+      let name = responseValueToParamName.get(c.value);
+      if (!name) {
+        const existingHeuristicName = /^\d+$/.test(c.value)
+          ? idValueToParamName.get(c.value)
+          : undefined;
+        name = existingHeuristicName || ensureUniqueParamName(c.paramNameGuess);
+        responseValueToParamName.set(c.value, name);
+        if (/^\d+$/.test(c.value) && !idValueToParamName.has(c.value)) {
+          idValueToParamName.set(c.value, name);
+        }
+        if (!extractedParams.some((p) => p.name === name)) {
+          responseExtractedParams.push({
+            name,
+            producerRequestUniqueId: c.producerUniqueId,
+            extractionPath: c.extractionPath || '$.id',
+            enabled: true,
+          });
+        }
+      }
+
+      const placeholder = `{{${name}}}`;
+
+      if (appearsInUrl) {
+        parameterizedUrl = replaceInUrlBoundaryAware(parameterizedUrl, c.value, placeholder);
+      }
+      if (appearsInBody && parameterizedBody) {
+        parameterizedBody = replaceInBodyBoundaryAware(parameterizedBody, c.value, placeholder);
+      }
+      if (appearsInHeaders) {
+        parameterizedHeaders = replaceInHeadersBoundaryAware(
+          parameterizedHeaders,
+          c.value,
+          placeholder
+        );
+      }
+
+      /** @type {Array<'url'|'body'|'headers'>} */
+      const locations = [];
+      if (appearsInUrl) locations.push('url');
+      if (appearsInBody) locations.push('body');
+      if (appearsInHeaders) locations.push('headers');
+
+      const existing = used.find((u) => u.name === name);
+      if (existing) {
+        existing.locations = Array.from(new Set([...existing.locations, ...locations]));
+      } else {
+        used.push({ name, locations });
+      }
+    }
+
+    // 2) Heuristic fallback: numeric id segments in URLs
+    const urlObj = safeParseUrl(originalUrl);
+    if (urlObj) {
+      const segments = urlObj.pathname.split('/').filter(Boolean);
+      let currentPathname = urlObj.pathname;
+      const numericSegments = segments.filter((s) => /^\d+$/.test(s));
+
+      for (const idValue of numericSegments) {
+        const name = idValueToParamName.get(idValue);
+        if (!name) continue;
+        const placeholder = `{{${name}}}`;
+
+        currentPathname = replaceAllExactSegment(currentPathname, idValue, placeholder);
+        parameterizedUrl = `${urlObj.origin}${currentPathname}${urlObj.search}${urlObj.hash}`;
+
+        const bodyHasExactMatch = valueAppearsAsCompleteJsonValue(parameterizedBody, idValue);
+        if (bodyHasExactMatch && parameterizedBody) {
+          const newBody = replaceInBodyBoundaryAware(parameterizedBody, idValue, placeholder);
+          if (newBody !== parameterizedBody) {
+            parameterizedBody = newBody;
+          }
+        }
+
+        const headersHaveExactMatch = valueAppearsAsCompleteHeaderValue(
+          parameterizedHeaders,
+          idValue
+        );
+        let headersChanged = false;
+        if (headersHaveExactMatch) {
+          const newHeaders = replaceInHeadersBoundaryAware(
+            parameterizedHeaders,
+            idValue,
+            placeholder
+          );
+          headersChanged = newHeaders !== parameterizedHeaders;
+          parameterizedHeaders = newHeaders;
+        }
+
+        /** @type {Array<'url'|'body'|'headers'>} */
+        const locations = ['url'];
+        if (parameterizedBody !== originalBody && parameterizedBody?.includes(placeholder)) {
+          locations.push('body');
+        }
+        if (headersChanged) {
+          locations.push('headers');
+        }
+        const existing = used.find((u) => u.name === name);
+        if (existing) {
+          existing.locations = Array.from(new Set([...existing.locations, ...locations]));
+        } else {
+          used.push({ name, locations });
+        }
+      }
+    }
+
+    return {
+      uniqueId: r.uniqueId,
+      originalUrl,
+      parameterizedUrl,
+      method: r.reqMethod,
+      originalBody,
+      parameterizedBody,
+      originalHeaders,
+      parameterizedHeaders,
+      usedParams: used,
+      extractedParams: [],
+    };
+  });
+
+  // Second pass: attach extracted params to producer request
+  const allExtractedParams = [...responseExtractedParams, ...extractedParams];
+  const requestsWithExtracted = perRequest.map((r) => ({
+    ...r,
+    extractedParams: allExtractedParams.filter((p) => p.producerRequestUniqueId === r.uniqueId),
+  }));
+
+  return {
+    requests: requestsWithExtracted,
+    allExtractedParams,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Express Router factory
+// ---------------------------------------------------------------------------
+
+/** Route-level timeout (ms) */
+const ROUTE_TIMEOUT_MS = 30_000;
+
+/**
+ * Creates an Express Router with `POST /analyze`.
+ * @returns {import('express').Router}
+ */
+export function createParameterizationRouter() {
+  const router = express.Router();
+
+  router.post('/analyze', (req, res) => {
+    const timer = setTimeout(() => {
+      if (!res.headersSent) {
+        res.status(504).json({ success: false, error: 'Analysis timed out (30s limit)' });
+      }
+    }, ROUTE_TIMEOUT_MS);
+
+    try {
+      const { networkRequests } = req.body || {};
+
+      if (!Array.isArray(networkRequests) || networkRequests.length === 0) {
+        clearTimeout(timer);
+        return res.status(400).json({
+          success: false,
+          error: 'networkRequests must be a non-empty array',
+        });
+      }
+
+      const start = Date.now();
+
+      // Filter to Fetch/XHR only (server-side filtering)
+      const xhrRequests = networkRequests.filter((r) => r.type === 'Fetch/XHR');
+
+      if (xhrRequests.length === 0) {
+        clearTimeout(timer);
+        return res.status(400).json({
+          success: false,
+          error: 'No Fetch/XHR requests found in the provided data',
+        });
+      }
+
+      const mapped = mapNetworkRequestsToInterceptorFormat(xhrRequests);
+      const model = analyzeNetworkInterceptorRequests(mapped);
+      const durationMs = Date.now() - start;
+
+      clearTimeout(timer);
+
+      return res.json({
+        success: true,
+        data: {
+          requests: model.requests,
+          allExtractedParams: model.allExtractedParams,
+        },
+        meta: {
+          inputCount: networkRequests.length,
+          analyzedCount: xhrRequests.length,
+          paramCount: model.allExtractedParams.length,
+          durationMs,
+        },
+      });
+    } catch (err) {
+      clearTimeout(timer);
+      console.error('[parameterization] Analysis error:', err);
+      if (!res.headersSent) {
+        return res.status(500).json({
+          success: false,
+          error: err?.message || 'Internal analysis error',
+        });
+      }
+    }
+  });
+
+  return router;
+}
+
 
 // Start the server
 const PORT = process.env.PORT || 5000;
