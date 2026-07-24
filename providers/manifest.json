@@ -1,0 +1,16 @@
+{
+  "$schema": "https://api-sync.dev/schemas/fixtures.json",
+  "description": "Dummy provider fixtures for testing the API Sync scanner.",
+  "generatedFor": "api-sync",
+  "providers": [
+    { "id": "stripe", "config": "stripe/config.json", "status": "outdated" },
+    { "id": "auth0", "config": "auth0/config.json", "status": "outdated" },
+    { "id": "oauth2-generic", "config": "oauth2/config.json", "status": "outdated" },
+    { "id": "twilio", "config": "twilio/config.json", "status": "outdated" },
+    { "id": "aws-s3", "config": "aws-s3/config.json", "status": "outdated" },
+    { "id": "firebase-auth", "config": "firebase/config.json", "status": "outdated" },
+    { "id": "sendgrid", "config": "sendgrid/config.json", "status": "current" },
+    { "id": "github-oauth", "config": "github-oauth/config.json", "status": "current" }
+  ],
+  "summary": { "total": 8, "outdated": 6, "current": 2 }
+}

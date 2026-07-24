@@ -1,0 +1,22 @@
+{
+  "provider": "oauth2-generic",
+  "category": "authentication",
+  "sdkPackage": null,
+  "sdkVersion": null,
+  "apiVersion": null,
+  "authType": "oauth2",
+  "flow": "implicit",
+  "credentials": {
+    "clientIdEnv": "OAUTH_CLIENT_ID",
+    "clientSecretEnv": "OAUTH_CLIENT_SECRET"
+  },
+  "endpoints": [
+    "GET https://provider.example.com/authorize",
+    "POST https://provider.example.com/token"
+  ],
+  "expected": {
+    "flow": "authorization_code_pkce"
+  },
+  "status": "outdated",
+  "notes": "Uses the Implicit grant, deprecated by OAuth 2.1. Should use Authorization Code + PKCE."
+}

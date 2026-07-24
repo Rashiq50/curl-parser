@@ -1,0 +1,21 @@
+{
+  "provider": "twilio",
+  "category": "messaging",
+  "sdkPackage": "twilio",
+  "sdkVersion": "3.84.1",
+  "apiVersion": "2010-04-01",
+  "authType": "basic",
+  "credentials": {
+    "accountSidEnv": "TWILIO_ACCOUNT_SID",
+    "authTokenEnv": "TWILIO_AUTH_TOKEN"
+  },
+  "endpoints": [
+    "POST https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json"
+  ],
+  "expected": {
+    "sdkVersion": "5.4.0",
+    "apiVersion": "2010-04-01"
+  },
+  "status": "outdated",
+  "notes": "SDK major 3 is EOL. API version is fine (stable), but the SDK should be upgraded to v5."
+}

@@ -1,0 +1,20 @@
+{
+  "provider": "firebase-auth",
+  "category": "authentication",
+  "sdkPackage": "firebase",
+  "sdkVersion": "10.14.1",
+  "apiVersion": null,
+  "authType": "token",
+  "credentials": {
+    "apiKeyEnv": "FIREBASE_API_KEY",
+    "projectIdEnv": "FIREBASE_PROJECT_ID"
+  },
+  "endpoints": [
+    "POST https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword"
+  ],
+  "expected": {
+    "sdkVersion": "11.10.0"
+  },
+  "status": "outdated",
+  "notes": "firebase-js-sdk v10 is a major behind. v11 is current. Modular API usage is otherwise fine."
+}

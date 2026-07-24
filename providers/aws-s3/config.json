@@ -1,0 +1,23 @@
+{
+  "provider": "aws-s3",
+  "category": "storage",
+  "sdkPackage": "aws-sdk",
+  "sdkVersion": "2.1691.0",
+  "apiVersion": null,
+  "authType": "sigv4",
+  "credentials": {
+    "accessKeyEnv": "AWS_ACCESS_KEY_ID",
+    "secretKeyEnv": "AWS_SECRET_ACCESS_KEY",
+    "regionEnv": "AWS_REGION"
+  },
+  "endpoints": [
+    "PUT https://{bucket}.s3.{region}.amazonaws.com/{key}",
+    "GET https://{bucket}.s3.{region}.amazonaws.com/{key}"
+  ],
+  "expected": {
+    "sdkPackage": "@aws-sdk/client-s3",
+    "sdkVersion": "3.x"
+  },
+  "status": "outdated",
+  "notes": "Uses monolithic aws-sdk v2 (maintenance mode, EOL). Migrate to modular @aws-sdk/client-s3 v3."
+}

@@ -1,0 +1,23 @@
+{
+  "provider": "github-oauth",
+  "category": "authentication",
+  "sdkPackage": null,
+  "sdkVersion": null,
+  "apiVersion": null,
+  "authType": "oauth2",
+  "flow": "authorization_code",
+  "credentials": {
+    "clientIdEnv": "GITHUB_CLIENT_ID",
+    "clientSecretEnv": "GITHUB_CLIENT_SECRET"
+  },
+  "endpoints": [
+    "GET https://github.com/login/oauth/authorize",
+    "POST https://github.com/login/oauth/access_token",
+    "GET https://api.github.com/user"
+  ],
+  "expected": {
+    "flow": "authorization_code"
+  },
+  "status": "current",
+  "notes": "Standard Authorization Code flow with server-side secret exchange and state. Should pass clean."
+}
