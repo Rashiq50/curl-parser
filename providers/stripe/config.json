@@ -2,8 +2,8 @@
   "provider": "stripe",
   "category": "payments",
   "sdkPackage": "stripe",
-  "sdkVersion": "8.222.0",
-  "apiVersion": "2020-08-27",
+  "sdkVersion": "17.5.0",
+  "apiVersion": "2025-06-30",
   "authType": "bearer",
   "credentials": {
     "secretKeyEnv": "STRIPE_SECRET_KEY",
@@ -17,6 +17,6 @@
     "sdkVersion": "17.5.0",
     "apiVersion": "2025-06-30"
   },
-  "status": "outdated",
+  "status": "current",
   "notes": "Uses the deprecated Charges API and a very old pinned SDK major. Should migrate to PaymentIntents."
 }
